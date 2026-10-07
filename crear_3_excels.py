@@ -1,21 +1,12 @@
-"""
-Script para crear 3 archivos Excel de práctica (ejercicios de limpieza de datos + ML).
 
-Requisitos (ya instalados en este equipo):
-    pip install pandas openpyxl
-
-- pandas: manipulación de datos (DataFrames = tablas).
-- openpyxl: motor que permite ESCRIBIR archivos .xlsx (Excel).
-- pd.ExcelWriter: contenedor para escribir varias hojas en un mismo archivo Excel.
-"""
 
 import pandas as pd
 
-# ============================================================
+
 # EJERCICIO 1 - TRANSPORTE
-# ============================================================
+
 # Contexto: Empresa Municipal de Transporte Urbano (EMTU).
-# Objetivo (target): predecir la columna "retraso_mayor_10" (1 = tuvo retraso >10 min, 0 = no).
+# Objetivo/target: predecir la columna "retraso_mayor_10" (1 = tuvo retraso >10 min, 0 = no).
 # Algoritmo sugerido: RandomForestClassifier (clasificación porque la respuesta es 0/1).
 
 # Lista de filas crudas. Cada sublista = 1 viaje, en el mismo orden que "columns" de abajo.
@@ -96,9 +87,9 @@ with pd.ExcelWriter("01_Transporte_EMTU.xlsx", engine="openpyxl") as writer:
     ref_transporte.to_excel(writer, sheet_name="Referencia", index=False)
 
 
-# ============================================================
+
 # EJERCICIO 2 - MANTENIMIENTO INDUSTRIAL
-# ============================================================
+
 # Contexto: Industrias Andinas de Manufactura S.A.
 # Objetivo: predecir "falla_24h" (1 = la máquina fallará en las próximas 24 horas).
 # Mismos problemas de calidad que el ejercicio 1:
@@ -173,9 +164,9 @@ with pd.ExcelWriter(
     ref_maquinas.to_excel(writer, sheet_name="Referencia", index=False)
 
 
-# ============================================================
+
 # EJERCICIO 3 - CONSUMO DE ENERGÍA
-# ============================================================
+
 # Contexto: Administración del Complejo Administrativo Central.
 # Objetivo: predecir "consumo_kwh" (kWh consumidos).
 # OJO: aquí el objetivo es NUMÉRICO continuo, no 0/1, por eso el algoritmo
