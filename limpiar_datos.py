@@ -1,213 +1,290 @@
 """
-Limpieza de datos: lee los 3 archivos "sucios" (Datos_Crudos) y
-genera versiones limpias en archivos nuevos (*_limpio.xlsx).
+Script de LIMPIEZA DE DATOS para los 3 ejercicios.
+
+Lee los archivos creados por 'crear_3_excels.py' (hoja Datos_Crudos),
+corrige los errores de cada tabla y genera versiones limpias
+en archivos nuevos (*_limpio.xlsx) para poder entrenar el modelo.
 
 Limpiezas aplicadas:
-  1. Duplicados    -> se eliminan filas repetidas.
-  2. Nulos          -> se imputan con la MEDIANA de la columna.
-  3. Categorías     -> se estandarizan (minúsculas/mayúsculas, tildes, alias)
-                       usando la hoja "Referencia" como guía.
-  4. Outliers       -> se recortan (winsorización) con el método IQR:
-                       límites = Q1 - 1.5*IQR  y  Q3 + 1.5*IQR.
+  1. Duplicados              -> se eliminan las filas repetidas.
+  2. Categorías inconsistentes -> se estandarizan a los valores válidos
+                                 de la hoja "Referencia".
+  3. Nulos                    -> se rellenan con la MEDIANA de la columna.
+  4. Outliers (valores extremos) -> se recortan (winsorización) usando IQR:
+                                   límites = Q1 - 1.5*IQR  y  Q3 + 1.5*IQR.
 
-Cada archivo limpio contiene las hojas:
-  Datos_Limpios   -> datos ya corregidos
-  Reporte_Limpieza -> registro de todo lo que se hizo
-  Diccionario / Referencia / Instrucciones -> copiadas del original
+Cada archivo limpio tiene 5 hojas:
+  Datos_Limpios      -> los datos ya corregidos
+  Reporte_Limpieza   -> registro de TODO lo que se hizo (para justificar)
+  Diccionario        -> copiada del archivo original
+  Instrucciones      -> copiada del archivo original
+  Referencia         -> copiada del archivo original
+
+pandas: manipula las tablas. openpyxl: escribe los .xlsx.
 """
 
 import pandas as pd
 
-ORIGINALES = [
-    "01_Transporte_EMTU.xlsx",
-    "02_Mantenimiento_Industrial.xlsx",
-    "03_Consumo_Energia.xlsx",
-]
-LIMPIOS = [
-    "01_Transporte_EMTU_limpio.xlsx",
-    "02_Mantenimiento_Industrial_limpio.xlsx",
-    "03_Consumo_Energia_limpio.xlsx",
-]
+# ----------------------------------------------------------------------------
+# Funciones auxiliares (reusadas en los 3 ejercicios)
+# ----------------------------------------------------------------------------
+
+def estandarizar(df, columna, mapa, reporte, PASO="Categorías"):
+    """Convierte todas las variantes (mayúsculas, minúsculas, sin tilde, alias)
+    a un único valor válido usando un mapa. Los cambios quedan en el reporte."""
+    antes = df[columna].copy()
+    normalizado = df[columna].str.strip().str.lower()
+    corregido = normalizado.map(mapa)
+    sin_mapear = corregido.isna() & antes.notna()
+    if sin_mapear.any():
+        raise ValueError(f"Columna '{columna}': sin mapeo -> {antes[sin_mapear].unique()}")
+    df[columna] = corregido
+    cambios = int((antes != df[columna]).sum())
+    reporte.append([PASO, f"'{columna}' estandarizada a valores válidos", cambios])
 
 
-def leer(archivo):
-    return pd.read_excel(archivo, sheet_name="Datos_Crudos")
+def imputar_mediana(df, columnas, reporte):
+    """Rellena los valores faltantes (NaN) con la mediana de cada columna."""
+    for c in columnas:
+        faltan = int(df[c].isna().sum())
+        if faltan > 0:
+            mediana = df[c].median()
+            df[c] = df[c].fillna(mediana)
+            reporte.append(["Nulos", f"'{c}' rellenos con la mediana ({mediana:.1f})", faltan])
 
 
-def reportar(logs):
-    return pd.DataFrame(logs, columns=["Paso", "Acción aplicada", "Cantidad"])
-
-
-def estandarizar(df, col, mapeo, logs):
-    """Estandariza una columna categórica usando un mapeo de alias (lower-case key)."""
-    original = df[col]
-    normalizado = original.str.strip().str.lower()
-    corregido = normalizado.map(mapeo)
-    no_mapeadas = corregido.isna() & original.notna()
-    if no_mapeadas.any():
-        raros = original[no_mapeadas].unique()
-        raise ValueError(f"Columna '{col}': valores sin mapeo: {raros}")
-    df[col] = corregido
-    n_cambios = int((original != df[col]).sum())
-    logs.append(["Categorías", f"'{col}' estandarizada a valores válidos", n_cambios])
-
-
-def imputar_mediana(df, cols, logs):
-    for c in cols:
-        n = int(df[c].isna().sum())
-        if n > 0:
-            med = df[c].median()
-            df[c] = df[c].fillna(med)
-            logs.append(["Nulos", f"'{c}' imputados con la mediana ({med:.1f})", n])
-
-
-def recortar_outliers_iqr(df, cols, logs):
-    for c in cols:
+def recortar_outliers(df, columnas, reporte):
+    """Detecta outliers con el método IQR y los recorta al límite más cercano
+    (no borra filas: suaviza el valor extremo). Deja constancia en el reporte."""
+    for c in columnas:
         df[c] = pd.to_numeric(df[c], errors="coerce").astype("float64")
-        q1 = df[c].quantile(0.25)
-        q3 = df[c].quantile(0.75)
+        q1, q3 = df[c].quantile(0.25), df[c].quantile(0.75)
         iqr = q3 - q1
-        lim_inf = q1 - 1.5 * iqr
-        lim_sup = q3 + 1.5 * iqr
-        fuera = (df[c] < lim_inf) | (df[c] > lim_sup)
+        limite_inf = q1 - 1.5 * iqr
+        limite_sup = q3 + 1.5 * iqr
+        fuera = (df[c] < limite_inf) | (df[c] > limite_sup)
         n = int(fuera.sum())
         if n > 0:
             antes = df.loc[fuera, c].tolist()
-            df.loc[fuera, c] = df[c].clip(lower=lim_inf, upper=lim_sup)[fuera]
+            df.loc[fuera, c] = df[c].clip(lower=limite_inf, upper=limite_sup)[fuera]
             despues = df.loc[fuera, c].tolist()
-            logs.append(
+            reporte.append(
                 ["Outliers",
-                 f"'{c}' recortados a [{lim_inf:.1f}, {lim_sup:.1f}] "
+                 f"'{c}' recortados a [{limite_inf:.1f}, {limite_sup:.1f}] "
                  f"(antes={antes}, después={despues})",
                  n]
             )
 
 
-def limpiar_transporte():
-    df = leer(ORIGINALES[0])
-    n_orig = len(df)
-    logs = []
+# ============================================================
+# EJERCICIO 1 - TRANSPORTE
+# ============================================================
+# Empresa Municipal de Transporte Urbano (EMTU).
+# Objetivo: predecir "retraso_mayor_10" (1 = retraso >10 min, 0 = no).
 
-    n_dup = int(df.duplicated().sum())
-    if n_dup:
-        df = df.drop_duplicates()
-    logs.append(["Duplicados", "filas duplicadas eliminadas", n_dup])
+# 1. Cargar los datos CRUDOS (con los errores) desde el archivo original.
+df_transporte = pd.read_excel("01_Transporte_EMTU.xlsx", sheet_name="Datos_Crudos")
+n_originales = len(df_transporte)
 
-    estandarizar(df, "linea", {
-        "l1": "L1", "linea 1": "L1", "línea 1": "L1",
-        "l2": "L2", "l-2": "L2", "linea 2": "L2", "línea 2": "L2",
-        "l3": "L3", "linea 3": "L3", "línea 3": "L3",
-    }, logs)
-    estandarizar(df, "turno", {
-        "mañana": "Mañana", "manana": "Mañana",
-        "tarde": "Tarde", "noche": "Noche",
-    }, logs)
-    estandarizar(df, "lluvia", {
-        "sí": "Sí", "si": "Sí", "no": "No",
-    }, logs)
+# Lista que después se convierte en la hoja "Reporte_Limpieza".
+reporte_transporte = []
 
-    df["fecha"] = pd.to_datetime(df["fecha"])
+# 2. Eliminar duplicados (V012 estaba repetido).
+n_duplicados = int(df_transporte.duplicated().sum())
+df_transporte = df_transporte.drop_duplicates()
+reporte_transporte.append(["Duplicados", "filas duplicadas eliminadas", n_duplicados])
 
-    imputar_mediana(df, ["pasajeros", "temperatura", "mantenimiento_dias"], logs)
-    recortar_outliers_iqr(
-        df, ["pasajeros", "temperatura", "mantenimiento_dias"], logs
-    )
-    df["retraso_mayor_10"] = df["retraso_mayor_10"].astype(int)
+# 3. Estandarizar categorías usando los valores válidos de la hoja "Referencia".
+#    Antes: "L1","Linea 1","L-2","Línea 3"... -> Ahora: L1, L2, L3.
+estandarizar(df_transporte, "linea", {
+    "l1": "L1", "linea 1": "L1", "línea 1": "L1", "linea 1": "L1",
+    "l2": "L2", "l-2": "L2", "linea 2": "L2", "línea 2": "L2",
+    "l3": "L3", "linea 3": "L3", "línea 3": "L3",
+}, reporte_transporte)
+#    turno: "mañana" -> "Mañana", "noche" -> "Noche".
+estandarizar(df_transporte, "turno", {
+    "mañana": "Mañana", "manana": "Mañana", "tarde": "Tarde", "noche": "Noche",
+}, reporte_transporte)
+#    lluvia: "si"/"SI" -> "Sí", "no"/"NO" -> "No".
+estandarizar(df_transporte, "lluvia", {
+    "sí": "Sí", "si": "Sí", "no": "No",
+}, reporte_transporte)
 
-    logs.append(["Filas", "total: originales -> limpias", f"{n_orig} -> {len(df)}"])
-    logs.append(["Tipos", "'fecha' convertida a fecha (datetime)", len(df)])
-    return df, reportar(logs)
+# 4. Convertir la fecha de texto a tipo fecha (datetime).
+df_transporte["fecha"] = pd.to_datetime(df_transporte["fecha"])
+reporte_transporte.append(["Tipos", "'fecha' convertida a datetime", len(df_transporte)])
 
+# 5. Rellenar nulos con la mediana (pasajeros, temperatura, mantenimiento_dias).
+imputar_mediana(df_transporte, ["pasajeros", "temperatura", "mantenimiento_dias"],
+                reporte_transporte)
 
-def limpiar_maquinas():
-    df = leer(ORIGINALES[1])
-    n_orig = len(df)
-    logs = []
+# 6. Recortar outliers: V007 tenía 180 pasajeros (todos van de ~45 a ~70).
+recortar_outliers(df_transporte,
+                  ["pasajeros", "temperatura", "mantenimiento_dias"],
+                  reporte_transporte)
 
-    n_dup = int(df.duplicated().sum())
-    if n_dup:
-        df = df.drop_duplicates()
-    logs.append(["Duplicados", "filas duplicadas eliminadas", n_dup])
+# 7. Asegurar que la columna objetivo quede como 0/1 entero.
+df_transporte["retraso_mayor_10"] = df_transporte["retraso_mayor_10"].astype(int)
 
-    estandarizar(df, "tipo_maquina", {
-        "torno": "Torno", "fresadora": "Fresadora", "prensa": "Prensa",
-    }, logs)
-    estandarizar(df, "lubricacion", {
-        "buena": "Buena", "media": "Media", "baja": "Baja",
-    }, logs)
+reporte_transporte.append(
+    ["Filas", "total: originales -> limpias",
+     f"{n_originales} -> {len(df_transporte)}"]
+)
 
-    imputar_mediana(df, ["temperatura", "vibracion", "presion"], logs)
-    recortar_outliers_iqr(
-        df,
-        ["temperatura", "vibracion", "presion", "horas_operacion", "mantenimiento_dias"],
-        logs,
-    )
-    df["falla_24h"] = df["falla_24h"].astype(int)
-
-    logs.append(["Filas", "total: originales -> limpias", f"{n_orig} -> {len(df)}"])
-    return df, reportar(logs)
+# Convertir la lista en tabla (así se escribe como hoja de Excel).
+reporte_transporte = pd.DataFrame(
+    reporte_transporte, columns=["Paso", "Acción aplicada", "Cantidad"]
+)
 
 
-def limpiar_energia():
-    df = leer(ORIGINALES[2])
-    n_orig = len(df)
-    logs = []
+# 8. Escribir el archivo LIMPIO (5 hojas, igual que el patrón del script original).
+with pd.ExcelWriter("01_Transporte_EMTU_limpio.xlsx", engine="openpyxl") as writer:
+    df_transporte.to_excel(writer, sheet_name="Datos_Limpios", index=False)
+    reporte_transporte.to_excel(writer, sheet_name="Reporte_Limpieza", index=False)
+    pd.read_excel("01_Transporte_EMTU.xlsx", "Diccionario").to_excel(
+        writer, sheet_name="Diccionario", index=False)
+    pd.read_excel("01_Transporte_EMTU.xlsx", "Instrucciones").to_excel(
+        writer, sheet_name="Instrucciones", index=False)
+    pd.read_excel("01_Transporte_EMTU.xlsx", "Referencia").to_excel(
+        writer, sheet_name="Referencia", index=False)
 
-    n_dup = int(df.duplicated().sum())
-    if n_dup:
-        df = df.drop_duplicates()
-    logs.append(["Duplicados", "filas duplicadas eliminadas", n_dup])
-
-    estandarizar(df, "dia_semana", {
-        "lunes": "Lunes", "martes": "Martes",
-        "miércoles": "Miércoles", "miercoles": "Miércoles",
-        "jueves": "Jueves", "viernes": "Viernes",
-    }, logs)
-    estandarizar(df, "area", {
-        "oficinas": "Oficinas", "laboratorio": "Laboratorio", "servidores": "Servidores",
-    }, logs)
-
-    df["fecha"] = pd.to_datetime(df["fecha"])
-
-    imputar_mediana(df, ["temperatura", "humedad", "equipos_activos"], logs)
-    recortar_outliers_iqr(
-        df,
-        ["temperatura", "humedad", "personas", "equipos_activos", "consumo_kwh"],
-        logs,
-    )
-    df["hora"] = df["hora"].astype(int)
-
-    logs.append(["Filas", "total: originales -> limpias", f"{n_orig} -> {len(df)}"])
-    logs.append(["Tipos", "'fecha' convertida a fecha (datetime)", len(df)])
-    return df, reportar(logs)
+print("01_Transporte_EMTU_limpio.xlsx creado.")
 
 
-def guardar(archivo_origen, archivo_limpio, df_limpio, reporte):
-    """Crea el archivo limpio: Datos_Limpios + Reporte_Limpieza + hojas copiadas."""
-    with pd.ExcelWriter(archivo_limpio, engine="openpyxl") as writer:
-        df_limpio.to_excel(writer, sheet_name="Datos_Limpios", index=False)
-        reporte.to_excel(writer, sheet_name="Reporte_Limpieza", index=False)
-        for hoja in ["Diccionario", "Instrucciones", "Referencia"]:
-            pd.read_excel(archivo_origen, sheet_name=hoja).to_excel(
-                writer, sheet_name=hoja, index=False
-            )
-    print(f"  -> {archivo_limpio} creado.")
+# ============================================================
+# EJERCICIO 2 - MANTENIMIENTO INDUSTRIAL
+# ============================================================
+# Industrias Andinas de Manufactura S.A.
+# Objetivo: predecir "falla_24h" (1 = la máquina fallará en 24 horas).
+
+# 1. Cargar los datos crudos.
+df_maquinas = pd.read_excel("02_Mantenimiento_Industrial.xlsx", sheet_name="Datos_Crudos")
+n_originales = len(df_maquinas)
+
+reporte_maquinas = []
+
+# 2. Eliminar duplicados (M012 estaba repetido).
+n_duplicados = int(df_maquinas.duplicated().sum())
+df_maquinas = df_maquinas.drop_duplicates()
+reporte_maquinas.append(["Duplicados", "filas duplicadas eliminadas", n_duplicados])
+
+# 3. Estandarizar categorías: "torno"/"FRESADORA" -> "Torno"/"Fresadora",
+#    y lubricación "BUENA" -> "Buena".
+estandarizar(df_maquinas, "tipo_maquina", {
+    "torno": "Torno", "fresadora": "Fresadora", "prensa": "Prensa",
+}, reporte_maquinas)
+estandarizar(df_maquinas, "lubricacion", {
+    "buena": "Buena", "media": "Media", "baja": "Baja",
+}, reporte_maquinas)
+
+# 4. Rellenar nulos con la mediana (temperatura, vibracion, presion).
+imputar_mediana(df_maquinas, ["temperatura", "vibracion", "presion"],
+                reporte_maquinas)
+
+# 5. Recortar outliers: M007 tenía 95° / vibración 9.2 / 8900 horas.
+recortar_outliers(
+    df_maquinas,
+    ["temperatura", "vibracion", "presion", "horas_operacion", "mantenimiento_dias"],
+    reporte_maquinas
+)
+
+# 6. Columna objetivo como 0/1 entero.
+df_maquinas["falla_24h"] = df_maquinas["falla_24h"].astype(int)
+
+reporte_maquinas.append(
+    ["Filas", "total: originales -> limpias", f"{n_originales} -> {len(df_maquinas)}"]
+)
+
+reporte_maquinas = pd.DataFrame(
+    reporte_maquinas, columns=["Paso", "Acción aplicada", "Cantidad"]
+)
 
 
-def main():
-    resultados = [
-        limpiar_transporte(),
-        limpiar_maquinas(),
-        limpiar_energia(),
-    ]
-    for origen, limpio, (df, reporte) in zip(ORIGINALES, LIMPIOS, resultados):
-        print(f"\n=== {origen} ===")
-        print(reporte.to_string(index=False))
-        print(f"Datos limpios: {len(df)} filas x {len(df.columns)} columnas")
-        guardar(origen, limpio, df, reporte)
+# 7. Escribir el archivo LIMPIO.
+with pd.ExcelWriter("02_Mantenimiento_Industrial_limpio.xlsx",
+                    engine="openpyxl") as writer:
+    df_maquinas.to_excel(writer, sheet_name="Datos_Limpios", index=False)
+    reporte_maquinas.to_excel(writer, sheet_name="Reporte_Limpieza", index=False)
+    pd.read_excel("02_Mantenimiento_Industrial.xlsx", "Diccionario").to_excel(
+        writer, sheet_name="Diccionario", index=False)
+    pd.read_excel("02_Mantenimiento_Industrial.xlsx", "Instrucciones").to_excel(
+        writer, sheet_name="Instrucciones", index=False)
+    pd.read_excel("02_Mantenimiento_Industrial.xlsx", "Referencia").to_excel(
+        writer, sheet_name="Referencia", index=False)
 
-    print("\nLos 3 archivos LIMPIOS fueron creados.")
+print("02_Mantenimiento_Industrial_limpio.xlsx creado.")
 
 
-if __name__ == "__main__":
-    main()
+# ============================================================
+# EJERCICIO 3 - CONSUMO DE ENERGÍA
+# ============================================================
+# Administración del Complejo Administrativo Central.
+# Objetivo: predecir "consumo_kwh" (numérico -> este sí es regresión).
+
+# 1. Cargar los datos crudos.
+df_energia = pd.read_excel("03_Consumo_Energia.xlsx", sheet_name="Datos_Crudos")
+n_originales = len(df_energia)
+
+reporte_energia = []
+
+# 2. Eliminar duplicados (E012 estaba repetido).
+n_duplicados = int(df_energia.duplicated().sum())
+df_energia = df_energia.drop_duplicates()
+reporte_energia.append(["Duplicados", "filas duplicadas eliminadas", n_duplicados])
+
+# 3. Estandarizar categorías: "martes" -> "Martes", "Miercoles" -> "Miércoles",
+#    "OFICINAS" -> "Oficinas".
+estandarizar(df_energia, "dia_semana", {
+    "lunes": "Lunes", "martes": "Martes",
+    "miércoles": "Miércoles", "miercoles": "Miércoles",
+    "jueves": "Jueves", "viernes": "Viernes",
+}, reporte_energia)
+estandarizar(df_energia, "area", {
+    "oficinas": "Oficinas", "laboratorio": "Laboratorio", "servidores": "Servidores",
+}, reporte_energia)
+
+# 4. Convertir la fecha a tipo fecha (datetime).
+df_energia["fecha"] = pd.to_datetime(df_energia["fecha"])
+reporte_energia.append(["Tipos", "'fecha' convertida a datetime", len(df_energia)])
+
+# 5. Rellenar nulos con la mediana (temperatura, humedad, equipos_activos).
+imputar_mediana(df_energia, ["temperatura", "humedad", "equipos_activos"],
+                reporte_energia)
+
+# 6. Recortar outliers: E013 tenía temperatura 500 y consumo ¡9999 kWh!
+recortar_outliers(
+    df_energia,
+    ["temperatura", "humedad", "personas", "equipos_activos", "consumo_kwh"],
+    reporte_energia
+)
+
+# 7. La hora queda como entero.
+df_energia["hora"] = df_energia["hora"].astype(int)
+
+reporte_energia.append(
+    ["Filas", "total: originales -> limpias", f"{n_originales} -> {len(df_energia)}"]
+)
+
+reporte_energia = pd.DataFrame(
+    reporte_energia, columns=["Paso", "Acción aplicada", "Cantidad"]
+)
+
+
+# 8. Escribir el archivo LIMPIO.
+with pd.ExcelWriter("03_Consumo_Energia_limpio.xlsx", engine="openpyxl") as writer:
+    df_energia.to_excel(writer, sheet_name="Datos_Limpios", index=False)
+    reporte_energia.to_excel(writer, sheet_name="Reporte_Limpieza", index=False)
+    pd.read_excel("03_Consumo_Energia.xlsx", "Diccionario").to_excel(
+        writer, sheet_name="Diccionario", index=False)
+    pd.read_excel("03_Consumo_Energia.xlsx", "Instrucciones").to_excel(
+        writer, sheet_name="Instrucciones", index=False)
+    pd.read_excel("03_Consumo_Energia.xlsx", "Referencia").to_excel(
+        writer, sheet_name="Referencia", index=False)
+
+print("03_Consumo_Energia_limpio.xlsx creado.")
+
+
+# ============================================================
+# RESUMEN FINAL
+# ============================================================
+print("\nLimpieza completada: los 3 archivos LIMPIOS fueron creados.")
